@@ -4,7 +4,7 @@
     path: /etc/rancher/rke2
     state: directory
     mode: '0755'
-  
+
 - name: Install RKE2 server
   become: true
   ansible.builtin.shell: |
@@ -116,11 +116,54 @@
     enabled: yes
   when: inventory_hostname in agent_nodes
 
-# Storage class
+# Ensure kubectl is correctly symlinked
+- name: Check if RKE2 kubectl binary exists
+  become: true
+  ansible.builtin.stat:
+    path: /var/lib/rancher/rke2/bin/kubectl
+  register: rke2_kubectl_stat
+  when: inventory_hostname == server_node
+
+- name: Create kubectl symlink
+  become: true
+  ansible.builtin.file:
+    src: /var/lib/rancher/rke2/bin/kubectl
+    dest: /usr/local/bin/kubectl
+    state: link
+    force: yes
+  when:
+    - inventory_hostname == server_node
+    - not rke2_kubectl_stat.stat.exists
+
+# Set KUBECONFIG environment variable
+- name: Set KUBECONFIG environment variable in /etc/environment
+  become: true
+  ansible.builtin.lineinfile:
+    path: /etc/environment
+    line: "KUBECONFIG=/etc/rancher/rke2/rke2.yaml"
+    create: yes
+    regexp: '^KUBECONFIG='
+  when: inventory_hostname == server_node
+
+# Wait for nodes to be ready
+- name: Wait for Kubernetes nodes to be ready
+  become: true
+  ansible.builtin.command: kubectl get nodes
+  register: kubectl_result
+  until: kubectl_result.rc == 0
+  retries: 12
+  delay: 10
+  environment:
+    KUBECONFIG: /etc/rancher/rke2/rke2.yaml
+  when: inventory_hostname == server_node
+
+# Get Kubernetes node names
 - name: Get Kubernetes node names
   become: true
   ansible.builtin.command: kubectl get nodes -o jsonpath='{.items[*].metadata.name}'
   register: k8s_nodes
+  environment:
+    KUBECONFIG: /etc/rancher/rke2/rke2.yaml
   when: inventory_hostname == server_node
   ignore_errors: true
 
@@ -129,36 +172,21 @@
     k8s_node_names: "{{ k8s_nodes.stdout.split() }}"
   when: inventory_hostname == server_node
 
-- name: Display Kubernetes node names
-  ansible.builtin.debug:
-    var: k8s_node_names
-  when: inventory_hostname == server_node
-
-- name: Update apt cache
-  become: true
-  apt:
-    update_cache: yes
-  when: inventory_hostname == server_node
-
-- name: Install required Python packages
-  become: true
-  apt:
-    name:
-      - python3-kubernetes
-      - python3-yaml
-    state: present
-  when: inventory_hostname == server_node
-
+# Deploy Local Path Provisioner
 - name: Check if local-path-storage namespace exists
   become: true
   command: kubectl get namespace local-path-storage
   register: namespace_check
   ignore_errors: true
+  environment:
+    KUBECONFIG: /etc/rancher/rke2/rke2.yaml
   when: inventory_hostname == server_node
 
 - name: Create local-path-storage namespace if it doesn't exist
   become: true
   command: kubectl create namespace local-path-storage
+  environment:
+    KUBECONFIG: /etc/rancher/rke2/rke2.yaml
   when: 
     - inventory_hostname == server_node
     - namespace_check.rc != 0
@@ -166,6 +194,8 @@
 - name: Deploy Local Path Provisioner
   become: true
   command: kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/master/deploy/local-path-storage.yaml
+  environment:
+    KUBECONFIG: /etc/rancher/rke2/rke2.yaml
   when: inventory_hostname == server_node
 
 - name: Check if local-path is already default storage class
@@ -173,6 +203,8 @@
   command: kubectl get storageclass local-path -o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}'
   register: default_sc_check
   ignore_errors: true
+  environment:
+    KUBECONFIG: /etc/rancher/rke2/rke2.yaml
   when: inventory_hostname == server_node
 
 - name: Set Local Path Provisioner as default storage class
@@ -180,49 +212,8 @@
   command: >
     kubectl patch storageclass local-path -p 
     '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+  environment:
+    KUBECONFIG: /etc/rancher/rke2/rke2.yaml
   when:
     - inventory_hostname == server_node
     - default_sc_check.stdout != "true"
-
-# Common tasks
-- name: Check if kubectl exists
-  become: true
-  ansible.builtin.stat:
-    path: /usr/local/bin/kubectl
-  register: kubectl_stat
-  when: inventory_hostname == server_node
-
-- name: Remove existing kubectl if it's a regular file
-  become: true
-  ansible.builtin.file:
-    path: /usr/local/bin/kubectl
-    state: absent
-  when: 
-    - inventory_hostname == server_node
-    - kubectl_stat.stat.exists
-    - not kubectl_stat.stat.islnk
-
-- name: Create kubectl symlink
-  become: true
-  ansible.builtin.file:
-    src: /var/lib/rancher/rke2/bin/kubectl
-    dest: /usr/local/bin/kubectl
-    state: link
-  when: inventory_hostname == server_node
-
-- name: Set KUBECONFIG environment variable
-  become: true
-  ansible.builtin.lineinfile:
-    path: /etc/environment
-    line: "KUBECONFIG=/etc/rancher/rke2/rke2.yaml"
-    create: yes
-  when: inventory_hostname == server_node
-
-- name: Wait for nodes to be ready
-  become: true
-  ansible.builtin.command: kubectl get nodes
-  register: kubectl_result
-  until: kubectl_result.rc == 0
-  retries: 12
-  delay: 10
-  when: inventory_hostname == server_node

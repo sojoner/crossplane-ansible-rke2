@@ -4,6 +4,7 @@
   register: rke2_uninstall_script
 
 - name: Run RKE2 uninstall script if it exists
+  become: true
   ansible.builtin.command: /usr/local/bin/rke2-uninstall.sh
   when: rke2_uninstall_script.stat.exists
   ignore_errors: true
