@@ -1,0 +1,6 @@
+---
+- include_tasks: create-rke2.yaml
+  when: ansible_provider_meta.sojoner_rke2.state == 'present'
+
+- include_tasks: delete-rke2.yaml
+  when: ansible_provider_meta.sojoner_rke2.state == 'absent'
